@@ -4,15 +4,14 @@ import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-# Import the g4f Client
-from g4f.client import Client
+# Import the g4f AsyncClient for asynchronous compatibility
+from g4f.client import AsyncClient
 
 # Initialize the FastAPI app
 app = FastAPI()
 
-# Initialize the G4F Client
-# This is the official and recommended way to interact with g4f
-client = Client()
+# Initialize the G4F AsyncClient
+client = AsyncClient()
 
 # As g4f's Client API doesn't provide a direct function to get all model names,
 # the most reliable approach is to provide a curated list of recommended models
@@ -31,7 +30,7 @@ RECOMMENDED_MODELS = [
 
 @app.get("/")
 def read_root():
-    return {"message": "G4F Provider is running with official Client API"}
+    return {"message": "G4F Provider is running with official AsyncClient API"}
 
 # OpenAI-compatible Models endpoint
 @app.get("/v1/models")
@@ -62,21 +61,19 @@ async def chat_completions(request: Request):
         if not messages:
             raise HTTPException(status_code=400, detail="'messages' field is required.")
         
-        # --- KEY CHANGE: Simplified Error Handling ---
-        # The stream generator now uses a general Exception to catch any g4f-related issues.
+        # --- KEY CHANGE: Use AsyncClient for streaming and non-streaming ---
         async def stream_generator():
             try:
-                # The Client's stream returns complete OpenAI Chunk objects
-                async for chunk in client.chat.completions.create(
+                # Use .stream() method for asynchronous streaming
+                async for chunk in client.chat.completions.stream(
                     model=model,
                     messages=messages,
-                    stream=True,
                 ):
-                    # We can directly convert the chunk object to a JSON string
+                    # Directly yield the chunk as JSON (compatible with OpenAI format)
                     yield f"data: {chunk.model_dump_json()}\n\n"
                 
                 yield "data: [DONE]\n\n"
-            except Exception as e: # Catch any exception from the g4f library
+            except Exception as e:
                 print(f"An error occurred during g4f stream: {e}")
                 error_response = {
                     "error": {"message": str(e), "type": "g4f_error"}
@@ -87,15 +84,14 @@ async def chat_completions(request: Request):
         if stream:
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
-            # For non-streamed requests, also use a general Exception
-            response = client.chat.completions.create(
+            # For non-streamed requests, await the .create() method
+            response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                stream=False
             )
-            # The g4f Client returns an object that is fully compatible with OpenAI's Response
+            # Return the dumped response (OpenAI-compatible)
             return response.model_dump()
 
-    except Exception as e: # General catch-all for any other errors
+    except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")

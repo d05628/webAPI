@@ -1,26 +1,72 @@
 import asyncio
+import json
+import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import g4f
-import json
 
 # 初始化 FastAPI 应用
 app = FastAPI()
 
-# G4F 可用模型列表 (可以根据需要自行增删)
-# 你可以通过 g4f.Provider.main.get_models() 获取更多
-SUPPORTED_MODELS = [
-    "gpt-3.5-turbo",
-    "gpt-4",
-    "gpt-4-turbo",
-    "gpt-4o",
-    "gemini-pro",
-    "claude-3-haiku-20240307"
-]
+# 存放动态获取的模型列表的缓存
+# { "models": [...], "last_updated": timestamp }
+model_cache = {
+    "models": [],
+    "last_updated": 0
+}
+CACHE_DURATION = 3600 # 缓存1小时 (3600秒)
+
+def get_dynamic_models():
+    """
+    动态获取 g4f 支持的模型列表，并进行缓存。
+    """
+    global model_cache
+    current_time = time.time()
+
+    # 如果缓存有效，则直接返回缓存数据
+    if model_cache["models"] and (current_time - model_cache["last_updated"] < CACHE_DURATION):
+        return model_cache["models"]
+
+    print("Cache expired or empty. Fetching new model list from g4f...")
+    try:
+        # 使用 g4f 内部工具获取所有可用的模型名称
+        # g4f.models.ModelUtils.get_models() 返回一个包含模型对象的列表
+        all_models = g4f.models.ModelUtils.get_models()
+        # 我们只需要模型的名称 (__name__)
+        model_names = [model.__name__ for model in all_models if hasattr(model, '__name__')]
+        
+        # 更新缓存
+        model_cache["models"] = sorted(list(set(model_names))) # 排序并去重
+        model_cache["last_updated"] = current_time
+        print(f"Successfully fetched and cached {len(model_cache['models'])} models.")
+        return model_cache["models"]
+    except Exception as e:
+        print(f"Error fetching dynamic models: {e}")
+        # 如果获取失败，返回一个保底的基础模型列表
+        return ["gpt-3.5-turbo", "gpt-4", "gpt-4o", "gemini-pro"]
 
 @app.get("/")
 def read_root():
     return {"message": "G4F Provider is running"}
+
+# OpenAI 兼容的 Models 接口
+@app.get("/v1/models")
+async def list_models():
+    """
+    提供兼容 OpenAI 的模型列表接口，数据源于动态获取的 g4f 模型。
+    """
+    model_names = get_dynamic_models()
+    model_data = []
+    created_time = int(time.time())
+
+    for model_id in model_names:
+        model_data.append({
+            "id": model_id,
+            "object": "model",
+            "created": created_time,
+            "owned_by": "g4f",
+        })
+    return {"object": "list", "data": model_data}
 
 # OpenAI 兼容的 Chat Completions 接口
 @app.post("/v1/chat/completions")
@@ -34,29 +80,19 @@ async def chat_completions(request: Request):
         if not messages:
             raise HTTPException(status_code=400, detail="'messages' field is required.")
         
-        # 确认模型是否受支持
-        # g4f 会自动选择一个能用这个模型的 provider
-        if model not in SUPPORTED_MODELS:
-            print(f"Warning: Model '{model}' not in explicitly supported list, but attempting to proceed.")
-
-        # 定义 g4f 的响应函数
-        async def stream_response():
+        # --- 错误修复：这里的异步处理是关键 ---
+        async def stream_generator():
             try:
-                # 使用 g4f 创建响应
-                response_stream = await g4f.ChatCompletion.create_async(
+                # create_async 返回一个异步生成器，我们必须用 `async for` 来迭代它
+                async for chunk in g4f.ChatCompletion.create_async(
                     model=model,
                     messages=messages,
                     stream=True,
-                )
-                
-                # 流式响应
-                chunk_id = 0
-                for chunk in response_stream:
-                    # 构建 SSE (Server-Sent Events) 格式
+                ):
                     response_json = {
-                        "id": f"chatcmpl-{chunk_id}",
+                        "id": f"chatcmpl-{int(time.time())}",
                         "object": "chat.completion.chunk",
-                        "created": asyncio.get_event_loop().time(),
+                        "created": int(time.time()),
                         "model": model,
                         "choices": [{
                             "index": 0,
@@ -65,76 +101,52 @@ async def chat_completions(request: Request):
                         }]
                     }
                     yield f"data: {json.dumps(response_json)}\n\n"
-                    chunk_id += 1
 
-                # 发送结束标志
+                # 流结束后发送一个终止块
                 finish_json = {
-                    "id": f"chatcmpl-{chunk_id}",
+                    "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
-                    "created": asyncio.get_event_loop().time(),
+                    "created": int(time.time()),
                     "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
                 }
                 yield f"data: {json.dumps(finish_json)}\n\n"
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
-                error_detail = f"Error during g4f stream: {str(e)}"
-                print(error_detail)
-                # 在流中发送错误信息可能比较困难，这里主要是在服务端打印
-                # 也可以尝试发送一个错误格式的 SSE
-                error_json = {"error": error_detail}
-                yield f"data: {json.dumps(error_json)}\n\n"
+                print(f"Error during g4f stream: {e}")
+                error_response = {
+                    "error": {
+                        "message": f"An error occurred during the stream: {str(e)}",
+                        "type": "g4f_error",
+                    }
+                }
+                # 在流中发送一个错误信息
+                yield f"data: {json.dumps(error_response)}\n\n"
+                yield "data: [DONE]\n\n"
 
-
-        # 根据 stream 参数决定返回类型
         if stream:
-            return StreamingResponse(stream_response(), media_type="text/event-stream")
+            return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
-            # 非流式响应
-            response = await g4f.ChatCompletion.create_async(
+            # 非流式响应保持不变
+            response_content = await g4f.ChatCompletion.create_async(
                 model=model,
                 messages=messages,
                 stream=False
             )
             return {
-                "id": f"chatcmpl-{asyncio.get_event_loop().time()}",
+                "id": f"chatcmpl-{int(time.time())}",
                 "object": "chat.completion",
-                "created": int(asyncio.get_event_loop().time()),
+                "created": int(time.time()),
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response,
-                    },
+                    "message": {"role": "assistant", "content": response_content},
                     "finish_reason": "stop",
                 }],
-                "usage": {
-                    "prompt_tokens": 0, # g4f 不提供 token 计数
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             }
 
     except Exception as e:
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# OpenAI 兼容的 Models 接口
-@app.get("/v1/models")
-async def list_models():
-    model_data = []
-    current_time = int(asyncio.get_event_loop().time())
-    for model_id in SUPPORTED_MODELS:
-        model_data.append({
-            "id": model_id,
-            "object": "model",
-            "created": current_time,
-            "owned_by": "g4f",
-        })
-    return {"object": "list", "data": model_data}

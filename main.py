@@ -5,6 +5,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import g4f
 
+# 导入 g4f 的基础模型类，以便查询它的所有子类
+from g4f.models import Model
+
 # 初始化 FastAPI 应用
 app = FastAPI()
 
@@ -19,6 +22,7 @@ CACHE_DURATION = 3600 # 缓存1小时 (3600秒)
 def get_dynamic_models():
     """
     动态获取 g4f 支持的模型列表，并进行缓存。
+    使用 g4f.Model.__subclasses__() 的方式来获取所有模型类。
     """
     global model_cache
     current_time = time.time()
@@ -29,11 +33,13 @@ def get_dynamic_models():
 
     print("Cache expired or empty. Fetching new model list from g4f...")
     try:
-        # 使用 g4f 内部工具获取所有可用的模型名称
-        # g4f.models.ModelUtils.get_models() 返回一个包含模型对象的列表
-        all_models = g4f.models.ModelUtils.get_models()
-        # 我们只需要模型的名称 (__name__)
-        model_names = [model.__name__ for model in all_models if hasattr(model, '__name__')]
+        # --- 主要修改点 ---
+        # 旧代码 (错误): all_models = g4f.models.ModelUtils.get_models()
+        # 新代码 (正确): 直接获取所有继承了 g4f.models.Model 的子类
+        all_model_classes = Model.__subclasses__()
+        
+        # 我们需要模型的名称 (__name__)
+        model_names = [model.__name__ for model in all_model_classes if hasattr(model, '__name__')]
         
         # 更新缓存
         model_cache["models"] = sorted(list(set(model_names))) # 排序并去重
@@ -80,10 +86,8 @@ async def chat_completions(request: Request):
         if not messages:
             raise HTTPException(status_code=400, detail="'messages' field is required.")
         
-        # --- 错误修复：这里的异步处理是关键 ---
         async def stream_generator():
             try:
-                # create_async 返回一个异步生成器，我们必须用 `async for` 来迭代它
                 async for chunk in g4f.ChatCompletion.create_async(
                     model=model,
                     messages=messages,
@@ -102,7 +106,6 @@ async def chat_completions(request: Request):
                     }
                     yield f"data: {json.dumps(response_json)}\n\n"
 
-                # 流结束后发送一个终止块
                 finish_json = {
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion.chunk",
@@ -121,14 +124,12 @@ async def chat_completions(request: Request):
                         "type": "g4f_error",
                     }
                 }
-                # 在流中发送一个错误信息
                 yield f"data: {json.dumps(error_response)}\n\n"
                 yield "data: [DONE]\n\n"
 
         if stream:
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
-            # 非流式响应保持不变
             response_content = await g4f.ChatCompletion.create_async(
                 model=model,
                 messages=messages,

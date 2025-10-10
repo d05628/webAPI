@@ -58,14 +58,14 @@ async def read_root():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>G4F Provider Settings & Test</title>
         <style>
-            body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-            section { margin-bottom: 30px; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
-            input, select, textarea { width: 100%; padding: 8px; margin: 5px 0; }
-            button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-            button:hover { background: #0056b3; }
-            #response { background: #f8f9fa; padding: 10px; border-radius: 4px; white-space: pre-wrap; min-height: 100px; }
-            .error { color: red; }
-            .success { color: green; }
+            body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
+            section {{ margin-bottom: 30px; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }}
+            input, select, textarea {{ width: 100%; padding: 8px; margin: 5px 0; }}
+            button {{ padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+            button:hover {{ background: #0056b3; }}
+            #response {{ background: #f8f9fa; padding: 10px; border-radius: 4px; white-space: pre-wrap; min-height: 100px; }}
+            .error {{ color: red; }}
+            .success {{ color: green; }}
         </style>
     </head>
     <body>

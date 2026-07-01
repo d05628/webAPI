@@ -1,319 +1,362 @@
+# -*- coding: utf-8 -*-
 """
-======================================================================
- 全老师的测试页 —— FastAPI + Jinja2 render 教学 & G4F 对话接口
-======================================================================
-这个文件是整个项目的入口，包含两个教学重点：
+main.py
+=======
+全老师的测试页 —— FastAPI 版
 
-1.【render 的用法】
-   Web 开发里说的"render"（渲染），指服务器把 Python 里的数据（变量、
-   列表、字典……）"套"进一个 HTML 模板文件里，生成一份最终呈现给浏览器的
-   完整网页。
-     - 在 Flask 里，这个动作叫 render_template()
-     - 在 FastAPI 里，由 Jinja2Templates().TemplateResponse() 完成，
-       用法几乎一样，只是名字不同。
-   本文件的 "/" 路由就是完整的 render 示例，模板文件在 templates/index.html，
-   里面有详细中文注释讲解 {{ }}、{% if %}、{% for %} 等语法。
+本文件演示两件事：
+1）FastAPI 里"render"（模板渲染）的用法：
+   Jinja2Templates().TemplateResponse() 等价于 Flask 里的 render_template()。
+2）转接 G4F（免费/兼容 OpenAI 协议的对话服务），并留一条"自定义 API"
+   备用通道，防止免费 provider 失效导致测试跑不通。
 
-2.【G4F 对话接口的修复与优化】
-   原代码把 provider 写死成 "You"，g4f 依赖的都是免费/非官方通道，随时
-   可能被限流、下线，一旦硬编码的 provider 失效，整个对话功能就直接报错、
-   "跑不通"。这里做了三点优化：
-     a) provider 默认留空，让 g4f 自动挑选当前可用的免费 provider，
-        并且失败时自动换下一个（参考 g4f 官方 RetryProvider 思路）；
-     b) 加了超时保护（asyncio.wait_for），避免请求卡死；
-     c) 增加"自定义 OpenAI 兼容 API"备用通道 —— 如果你有任何 OpenAI 兼容
-        的 API Key（OpenAI 官方 / DeepSeek / Kimi / 通义千问兼容模式等），
-        填进设置页后，AI 对话测试区就能稳定使用，不用再赌免费 provider
-        今天能不能用。
-======================================================================
+运行方式：
+    pip install -r requirements.txt
+    uvicorn main:app --reload
+然后浏览器打开 http://127.0.0.1:8000
 """
 
-import asyncio
-import json
-import os
-import random
 import time
+import random
+import json
+import asyncio
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional, List, Dict, Any
 
-import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from g4f.client import AsyncClient
+import httpx
 
-app = FastAPI(title="全老师的测试页")
+# ------------------------------------------------------------------
+# g4f 是第三方库，导入失败也不影响 render 部分的教学演示，
+# 所以这里用 try/except 包一下，出错只是把 G4F 相关功能禁用掉。
+# ------------------------------------------------------------------
+try:
+    import g4f
+    G4F_AVAILABLE = True
+except Exception as e:  # noqa: BLE001
+    G4F_AVAILABLE = False
+    G4F_IMPORT_ERROR = str(e)
 
-# ----------------------------------------------------------------------------
-# 【render 用法讲解】：Jinja2Templates 就是 FastAPI 里做"渲染"的工具类。
-# directory="templates" 告诉 FastAPI 去哪个文件夹找模板文件。
-# 之后调用 templates.TemplateResponse(模板文件名, {"request": request, ...数据})
-# FastAPI 会读取模板文件，把第二个参数里的数据替换进模板的 {{ }} 占位符，
-# 生成完整 HTML 字符串返回给浏览器 —— 这整个过程就叫"渲染 (render)"。
-# ----------------------------------------------------------------------------
+
+app = FastAPI(title="全老师的测试页 —— FastAPI render + G4F 演示")
+
+# ------------------------------------------------------------------
+# ① render 的核心：Jinja2Templates
+# ------------------------------------------------------------------
+# FastAPI 官方推荐用法：
+#   templates = Jinja2Templates(directory="templates")
+#   return templates.TemplateResponse("xxx.html", {"request": request, ...})
+#
+# 注意：FastAPI（基于 Starlette）要求模板上下文里必须带上 "request" 这个键，
+# 这是和 Flask render_template() 最大的用法差异，Flask 不需要手动传 request。
+# ------------------------------------------------------------------
 templates = Jinja2Templates(directory="templates")
 
-# 挂载 static 文件夹，存放独立的 CSS / JS（前端逻辑和后端 render 分开，方便对比教学）
-os.makedirs("static", exist_ok=True)
+# 静态文件（CSS/JS），如果你不需要可以删掉这一行
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-client = AsyncClient()
 
-SETTINGS_FILE = "settings.json"
+# ------------------------------------------------------------------
+# 一个极简的"全局设置"，用来演示 provider / 自定义 API 的切换开关。
+# 生产环境请换成数据库或环境变量，这里图教学简单，直接用内存字典。
+# ------------------------------------------------------------------
+SETTINGS: Dict[str, Any] = {
+    # g4f 相关
+    "g4f_provider": "",          # 留空 = 让 g4f 自动挑选可用 provider
+    "g4f_model": "gpt-4o-mini",  # 默认模型，可在页面上改
 
-DEFAULT_MODELS = [
-    "gpt-4o-mini",
-    "gpt-4o",
-    "gpt-3.5-turbo",
-    "gemini-1.5-flash",
-    "claude-3-haiku",
-    "llama-3.1-70b",
-]
-
-DEFAULT_SETTINGS = {
-    "provider": "",  # 留空 = 让 g4f 自动挑选当前可用的免费 provider，更稳定
-    "models": DEFAULT_MODELS,
+    # 自定义 OpenAI 兼容 API（推荐，稳定性更好）
     "use_custom_api": False,
-    "custom_base_url": "",
+    "custom_api_base": "https://api.openai.com/v1",
     "custom_api_key": "",
-    "custom_model": "",
+    "custom_api_model": "gpt-4o-mini",
 }
 
 
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {**DEFAULT_SETTINGS, **data}
-        except Exception:
-            pass
-    return dict(DEFAULT_SETTINGS)
+# ====================================================================
+# 第一部分：render 教学演示
+# ====================================================================
 
-
-def save_settings(data):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-settings = load_settings()
-
-
-# =============================================================================
-# 首页：render 的核心演示
-# =============================================================================
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
+@app.get("/")
+async def index(request: Request):
     """
-    本项目"render 用法"的主入口。
+    首页：完整的 render 教学示例。
 
-    看这一行 ↓↓↓
-    templates.TemplateResponse("index.html", {"request": request, ...})
-    这行代码会读取 templates/index.html，把下面 context 字典里的数据
-    替换进模板的占位符里，生成最终 HTML 返回给浏览器。
+    演示点：
+    - 传变量（now、rand_num）
+    - 传列表（feature_list），模板里用 {% for %} 循环渲染
+    - 传布尔值（g4f_available），模板里用 {% if %} 条件渲染
+    - 每次刷新页面，now / rand_num 都会变化，说明这是"服务器端渲染"，
+      不是写死在 HTML 里的静态内容。
     """
     context = {
-        "request": request,
-        "title": "全老师的测试页",
+        "request": request,  # FastAPI 的 Jinja2Templates 必须带上这个 key
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "random_number": random.randint(1, 100),
-        "settings": settings,
-        "models": settings["models"],
+        "rand_num": random.randint(1, 100),
+        "feature_list": [
+            "① render 演示：服务器端模板渲染",
+            "② Provider / 模型设置：可视化切换 g4f 或自定义 API",
+            "③ 计算器小工具：前端 fetch() 异步调用后端接口",
+            "④ AI 对话测试区：流式 / 非流式 + 通道检测",
+        ],
+        "g4f_available": G4F_AVAILABLE,
+        "settings": SETTINGS,
     }
+    # 等价于 Flask 的：return render_template("index.html", **context)
     return templates.TemplateResponse("index.html", context)
 
 
-# =============================================================================
-# render 的另一个演示：传统"表单提交 -> 服务器渲染新页面"的小例子
-# 和首页里用 JS fetch 做异步交互的方式对比，帮助理解两种模式的区别
-# =============================================================================
-@app.get("/render_demo", response_class=HTMLResponse)
-async def render_demo(request: Request, name: str = "同学", mood: str = "开心"):
+@app.get("/render_demo")
+async def render_demo(
+    request: Request,
+    name: str = Query(default="同学", description="你的名字"),
+    mood: str = Query(default="开心", description="你现在的心情"),
+):
+    """
+    一个更"纯粹"的 render 小例子：
+    直接改浏览器地址栏的 URL 参数，就能看到页面内容跟着变化。
+
+    试试访问：
+      /render_demo?name=小明&mood=兴奋
+      /render_demo?name=全老师&mood=淡定
+    """
     context = {
         "request": request,
         "name": name,
         "mood": mood,
         "now": datetime.now().strftime("%H:%M:%S"),
+        "tip": "把网址里 name= 和 mood= 后面的内容改一改，回车看看效果！",
     }
     return templates.TemplateResponse("render_demo.html", context)
 
 
-# =============================================================================
-# 最简单的"前端 JS 调后端 API"演示：计算器（和 render 相反，不刷新页面）
-# =============================================================================
-@app.get("/api/add")
-async def api_add(a: float, b: float):
-    return {"a": a, "b": b, "result": a + b}
+# ====================================================================
+# 第二部分：计算器小工具（对比 render 和 fetch 两种数据展示方式）
+# ====================================================================
+
+class CalcRequest(BaseModel):
+    a: float
+    b: float
+    op: str  # + - * /
 
 
-# =============================================================================
-# provider / model 设置接口（沿用并扩展了原来的逻辑）
-# =============================================================================
-class SettingsRequest(BaseModel):
-    provider: str = ""
-    models: List[str]
-    use_custom_api: bool = False
-    custom_base_url: Optional[str] = ""
+@app.post("/api/calc")
+async def calc(payload: CalcRequest):
+    """
+    前端用 fetch() 异步调用这个接口，不刷新整个页面就能拿到计算结果。
+    这是和"render 整页刷新"相对的另一种常见前后端交互方式。
+    """
+    a, b, op = payload.a, payload.b, payload.op
+    try:
+        if op == "+":
+            result = a + b
+        elif op == "-":
+            result = a - b
+        elif op == "*":
+            result = a * b
+        elif op == "/":
+            if b == 0:
+                return JSONResponse({"ok": False, "error": "除数不能为 0"}, status_code=400)
+            result = a / b
+        else:
+            return JSONResponse({"ok": False, "error": f"不支持的运算符：{op}"}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    return {"ok": True, "result": result}
+
+
+# ====================================================================
+# 第三部分：Provider / 模型设置
+# ====================================================================
+
+class SettingsPayload(BaseModel):
+    g4f_provider: Optional[str] = ""
+    g4f_model: Optional[str] = "gpt-4o-mini"
+    use_custom_api: Optional[bool] = False
+    custom_api_base: Optional[str] = "https://api.openai.com/v1"
     custom_api_key: Optional[str] = ""
-    custom_model: Optional[str] = ""
+    custom_api_model: Optional[str] = "gpt-4o-mini"
 
 
-@app.get("/settings")
+@app.get("/api/settings")
 async def get_settings():
-    safe = dict(settings)
+    """返回当前设置（出于安全考虑，API Key 只回显掩码）"""
+    safe = dict(SETTINGS)
     if safe.get("custom_api_key"):
-        safe["custom_api_key"] = "*" * 6 + safe["custom_api_key"][-4:]
+        key = safe["custom_api_key"]
+        safe["custom_api_key_masked"] = key[:4] + "****" + key[-4:] if len(key) > 8 else "****"
+    else:
+        safe["custom_api_key_masked"] = ""
+    safe.pop("custom_api_key", None)
     return safe
 
 
-@app.post("/settings")
-async def set_settings(payload: SettingsRequest):
-    data = payload.dict()
-    # 如果前端没填新的 key（比如只是想改模型列表），就保留旧的 key，避免被清空
+@app.post("/api/settings")
+async def update_settings(payload: SettingsPayload):
+    """保存 provider / 模型 / 自定义 API 设置"""
+    data = payload.model_dump()
+    # 如果前端没填新 key（比如只改了模型名），保留原来的 key，不要清空
     if not data.get("custom_api_key"):
-        data["custom_api_key"] = settings.get("custom_api_key", "")
-    settings.update(data)
-    save_settings(settings)
-    return {"message": "设置已保存", "settings": settings}
+        data.pop("custom_api_key")
+    SETTINGS.update(data)
+    return {"ok": True, "settings": {**SETTINGS, "custom_api_key": "***已保存***" if SETTINGS["custom_api_key"] else ""}}
 
 
-@app.get("/v1/models")
-async def list_models():
-    created_time = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {"id": m, "object": "model", "created": created_time, "owned_by": "g4f-or-custom"}
-            for m in settings["models"]
-        ],
-    }
+# ====================================================================
+# 第四部分：AI 对话测试区（G4F + 自定义 OpenAI 兼容 API）
+# ====================================================================
+
+class ChatRequest(BaseModel):
+    messages: List[Dict[str, str]]  # [{"role": "user", "content": "..."}]
+    stream: bool = False
 
 
-# =============================================================================
-# G4F 兜底重试逻辑：原代码把 provider 写死成 "You"，一旦这个免费通道失效，
-# 请求就直接报错。这里做自动兜底：先试用户指定的 provider，不行的话
-# 再让 g4f 自动挑选可用的 provider（参考官方 RetryProvider 思路）。
-# =============================================================================
-async def g4f_chat_with_fallback(model, messages):
-    provider = settings.get("provider") or None
-    attempts = [provider, None] if provider else [None]
-    last_error = None
-    for p in attempts:
+async def call_g4f(messages: List[Dict[str, str]], stream: bool):
+    """
+    调用 g4f。
+
+    g4f 依赖免费/非官方通道，本身不保证一直可用。
+    这里做了两点优化：
+    1. provider 默认留空，让 g4f 自动挑选当前可用的通道；
+    2. 第一次失败自动重试一次（换个思路而不是直接报错）。
+    """
+    if not G4F_AVAILABLE:
+        raise RuntimeError(f"g4f 未正确安装：{G4F_IMPORT_ERROR}")
+
+    provider_name = SETTINGS.get("g4f_provider") or None
+    model = SETTINGS.get("g4f_model") or "gpt-4o-mini"
+
+    provider = None
+    if provider_name:
+        provider = getattr(g4f.Provider, provider_name, None)
+
+    kwargs = dict(model=model, messages=messages, stream=stream)
+    if provider is not None:
+        kwargs["provider"] = provider
+
+    last_err = None
+    for attempt in range(2):  # 最多重试一次
         try:
-            kwargs = {"provider": p} if p else {}
-            return await asyncio.wait_for(
-                client.chat.completions.create(model=model, messages=messages, **kwargs),
-                timeout=45,
-            )
-        except Exception as e:
-            last_error = e
-            continue
-    raise last_error or RuntimeError("g4f 没有可用的 provider")
+            response = g4f.ChatCompletion.create(**kwargs)
+            return response
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(0.5)
+    raise RuntimeError(f"g4f 调用失败（已重试）：{last_err}")
 
 
-async def g4f_stream_with_fallback(model, messages):
-    provider = settings.get("provider") or None
-    attempts = [provider, None] if provider else [None]
-    last_error = None
-    for p in attempts:
-        try:
-            kwargs = {"provider": p} if p else {}
-            async for chunk in client.chat.completions.stream(model=model, messages=messages, **kwargs):
-                yield chunk
-            return
-        except Exception as e:
-            last_error = e
-            continue
-    raise last_error or RuntimeError("g4f 没有可用的 provider")
+async def call_custom_api(messages: List[Dict[str, str]], stream: bool):
+    """
+    调用自定义 OpenAI 兼容 API。
+    只要是遵循 OpenAI /chat/completions 协议的服务都可以填进来，
+    比如 OpenAI 官方、DeepSeek、Kimi（Moonshot）、通义千问兼容模式等。
+    """
+    base = SETTINGS["custom_api_base"].rstrip("/")
+    key = SETTINGS["custom_api_key"]
+    model = SETTINGS["custom_api_model"]
 
+    if not key:
+        raise RuntimeError("未配置自定义 API Key，请先在「Provider / 模型设置」里填写")
 
-async def call_custom_api(model, messages, stream):
-    """走用户自己配置的、真正稳定的 OpenAI 兼容 API（作为 g4f 的备用/替代通道）"""
-    base_url = settings.get("custom_base_url", "").rstrip("/")
-    api_key = settings.get("custom_api_key", "")
-    if not base_url or not api_key:
-        raise HTTPException(status_code=400, detail="请先在设置里填写自定义 API 的 base_url 和 api_key")
-    url = f"{base_url}/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "stream": stream}
+    url = f"{base}/chat/completions"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    body = {"model": model, "messages": messages, "stream": stream}
 
-    if stream:
+    if not stream:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+    else:
+        # 流式：返回一个异步生成器，逐块 yield 文本内容
         async def gen():
-            async with httpx.AsyncClient(timeout=60) as hc:
-                async with hc.stream("POST", url, headers=headers, json=payload) as r:
-                    async for line in r.aiter_lines():
-                        if line:
-                            yield line + "\n\n"
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    else:
-        async with httpx.AsyncClient(timeout=60) as hc:
-            r = await hc.post(url, headers=headers, json=payload)
-            return JSONResponse(content=r.json(), status_code=r.status_code)
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:"):].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                            delta = chunk["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                yield delta
+                        except Exception:  # noqa: BLE001
+                            continue
+        return gen()
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    body = await request.json()
-    model = body.get("model") or (settings["models"][0] if settings["models"] else "gpt-3.5-turbo")
-    messages = body.get("messages")
-    stream = body.get("stream", False)
+@app.post("/api/chat")
+async def chat(payload: ChatRequest):
+    """
+    统一对话入口：
+    - SETTINGS["use_custom_api"] = True  → 走自定义 OpenAI 兼容 API
+    - SETTINGS["use_custom_api"] = False → 走 g4f
+    """
+    messages = payload.messages
+    stream = payload.stream
 
-    if not messages:
-        raise HTTPException(status_code=400, detail="'messages' 字段是必须的")
-
-    # 优先用自定义 OpenAI 兼容 API（如果配置了），保证 AI 对话测试一定能跑通
-    if settings.get("use_custom_api") and settings.get("custom_api_key"):
-        real_model = settings.get("custom_model") or model
-        return await call_custom_api(real_model, messages, stream)
-
-    # 否则走 g4f 免费通道（带自动兜底重试）
-    if stream:
-        async def stream_generator():
-            try:
-                async for chunk in g4f_stream_with_fallback(model, messages):
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-                yield "data: [DONE]\n\n"
-            except Exception as e:
-                error_response = {"error": {"message": f"g4f 请求失败：{e}", "type": "g4f_error"}}
-                yield f"data: {json.dumps(error_response, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-        return StreamingResponse(stream_generator(), media_type="text/event-stream")
-    else:
-        try:
-            response = await g4f_chat_with_fallback(model, messages)
-            return response.model_dump()
-        except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"g4f 所有 provider 都失败了：{e}。建议在设置里换个模型，或者配置自定义 API 作为备用通道。",
-            )
-
-
-@app.get("/api/status")
-async def api_status():
-    """给测试页用的探测接口：快速检查当前 g4f / 自定义 API 通道是否可用"""
-    test_messages = [{"role": "user", "content": "ping"}]
-    model = settings["models"][0] if settings["models"] else "gpt-3.5-turbo"
     try:
-        if settings.get("use_custom_api") and settings.get("custom_api_key"):
-            base_url = settings.get("custom_base_url", "").rstrip("/")
-            headers = {"Authorization": f"Bearer {settings['custom_api_key']}"}
-            async with httpx.AsyncClient(timeout=15) as hc:
-                r = await hc.post(
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json={"model": settings.get("custom_model") or model, "messages": test_messages},
-                )
-            return {"ok": r.status_code == 200, "channel": "custom_api", "detail": r.status_code}
+        if SETTINGS.get("use_custom_api"):
+            result = await call_custom_api(messages, stream)
         else:
-            await asyncio.wait_for(g4f_chat_with_fallback(model, test_messages), timeout=20)
-            return {"ok": True, "channel": "g4f"}
-    except Exception as e:
-        return {
-            "ok": False,
-            "channel": "custom_api" if settings.get("use_custom_api") else "g4f",
-            "detail": str(e),
-        }
+            result = await call_g4f(messages, stream)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    if not stream:
+        # 非流式：一次性把完整回答返回
+        text = result if isinstance(result, str) else "".join([c for c in result])
+        return {"ok": True, "reply": text}
+
+    # 流式：用 StreamingResponse 逐块吐字，前端配合 ReadableStream 读取
+    async def event_stream():
+        try:
+            if hasattr(result, "__aiter__"):
+                async for chunk in result:
+                    yield chunk
+            else:
+                # g4f 的 stream=True 一般返回同步生成器
+                for chunk in result:
+                    yield chunk
+        except Exception as e:  # noqa: BLE001
+            yield f"\n\n[出错了：{e}]"
+
+    return StreamingResponse(event_stream(), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/check_channel")
+async def check_channel():
+    """
+    "通道检测"按钮背后的接口：
+    发一条最简短的测试消息，看当前配置的对话通道能不能正常返回内容。
+    """
+    test_messages = [{"role": "user", "content": "请只回复两个字：正常"}]
+    start = time.time()
+    try:
+        if SETTINGS.get("use_custom_api"):
+            reply = await call_custom_api(test_messages, stream=False)
+            channel = "自定义 OpenAI 兼容 API"
+        else:
+            reply = await call_g4f(test_messages, stream=False)
+            reply = reply if isinstance(reply, str) else "".join([c for c in reply])
+            channel = "G4F"
+        elapsed = round(time.time() - start, 2)
+        return {"ok": True, "channel": channel, "reply": reply, "elapsed_sec": elapsed}
+    except Exception as e:  # noqa: BLE001
+        elapsed = round(time.time() - start, 2)
+        return JSONResponse(
+            {"ok": False, "channel": "自定义 OpenAI 兼容 API" if SETTINGS.get("use_custom_api") else "G4F",
+             "error": str(e), "elapsed_sec": elapsed},
+            status_code=500,
+        )

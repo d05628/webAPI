@@ -67,15 +67,27 @@
       <label for="use-custom-api" style="margin:0;">使用自定义 OpenAI 兼容 API（推荐）</label>
     </div>
 
-    <div id="g4f-fields" class="row">
-      <div class="field">
-        <label>g4f Provider（留空 = 自动选择可用通道）</label>
-        <input type="text" id="g4f-provider" value="{{ settings.g4f_provider }}" placeholder="例如 Bing / You / Blackbox（留空即可）">
+    <div id="g4f-fields">
+      <div class="row">
+        <div class="field" style="min-width:220px;">
+          <label>g4f Provider（实时拉取当前可用列表）</label>
+          <select id="g4f-provider" style="width:100%;">
+            <option value="">留空 = 自动选择可用通道</option>
+          </select>
+        </div>
+        <div class="field" style="min-width:220px;">
+          <label>g4f 模型（选完 Provider 后实时拉取）</label>
+          <select id="g4f-model" style="width:100%;">
+            <option value="">留空 = 用该 Provider 的默认模型</option>
+          </select>
+        </div>
       </div>
-      <div class="field">
-        <label>g4f 模型</label>
-        <input type="text" id="g4f-model" value="{{ settings.g4f_model }}" placeholder="gpt-4o-mini">
+      <div class="row">
+        <button class="secondary" type="button" onclick="loadProviders()">🔄 刷新 Provider 列表</button>
+        <button class="secondary" type="button" onclick="testCurrentProvider()">🧪 测试这个 Provider</button>
+        <button type="button" onclick="autoPickProvider()">⚡ 自动选择可用 Provider</button>
       </div>
+      <div id="g4f-test-result" class="muted"></div>
     </div>
 
     <div id="custom-fields" class="row">
@@ -161,6 +173,116 @@ function toggleApiFields() {
 }
 el('use-custom-api').addEventListener('change', toggleApiFields);
 toggleApiFields();
+
+// ============ ② Provider / 模型：实时加载 ============
+let providerCache = [];
+const SAVED_PROVIDER = "{{ settings.g4f_provider }}";
+const SAVED_MODEL = "{{ settings.g4f_model }}";
+
+async function loadProviders() {
+  const sel = el('g4f-provider');
+  sel.innerHTML = '<option value="">加载中...</option>';
+  try {
+    const res = await fetch('/api/g4f/providers');
+    const data = await res.json();
+    if (!data.ok) {
+      sel.innerHTML = '<option value="">加载失败</option>';
+      el('g4f-test-result').innerHTML = `<span style="color:#f87171">✗ ${data.error}</span>`;
+      return;
+    }
+    providerCache = data.providers;
+    let html = '<option value="">留空 = 自动选择可用通道</option>';
+    html += '<optgroup label="免费 / 免登录">';
+    providerCache.filter(p => !p.needs_auth).forEach(p => {
+      html += `<option value="${p.name}">${p.label}</option>`;
+    });
+    html += '</optgroup><optgroup label="需要 Key（如果你自己配置了）">';
+    providerCache.filter(p => p.needs_auth).forEach(p => {
+      html += `<option value="${p.name}">${p.label} 🔑</option>`;
+    });
+    html += '</optgroup>';
+    sel.innerHTML = html;
+    if (SAVED_PROVIDER) {
+      sel.value = SAVED_PROVIDER;
+      await loadModels(SAVED_PROVIDER, SAVED_MODEL);
+    }
+    el('g4f-test-result').innerHTML = `<span style="color:#4ade80">✓ 已加载 ${providerCache.length} 个可用 Provider</span>`;
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+    el('g4f-test-result').innerHTML = `<span style="color:#f87171">✗ 请求出错：${e}</span>`;
+  }
+}
+
+async function loadModels(providerName, presetModel) {
+  const sel = el('g4f-model');
+  if (!providerName) {
+    sel.innerHTML = '<option value="">留空 = 用该 Provider 的默认模型</option>';
+    return;
+  }
+  sel.innerHTML = '<option value="">加载模型中...</option>';
+  try {
+    const res = await fetch('/api/g4f/models?provider=' + encodeURIComponent(providerName));
+    const data = await res.json();
+    if (!data.ok || !data.models.length) {
+      sel.innerHTML = '<option value="">（该 Provider 没有列出具体模型，留空即可）</option>';
+      return;
+    }
+    let html = '<option value="">留空 = 用该 Provider 的默认模型</option>';
+    data.models.forEach(m => html += `<option value="${m}">${m}</option>`);
+    sel.innerHTML = html;
+    if (presetModel) sel.value = presetModel;
+  } catch (e) {
+    sel.innerHTML = '<option value="">模型加载失败</option>';
+  }
+}
+
+el('g4f-provider').addEventListener('change', (e) => loadModels(e.target.value, ''));
+
+async function testCurrentProvider() {
+  const provider = el('g4f-provider').value;
+  const model = el('g4f-model').value;
+  el('g4f-test-result').textContent = '测试中，最长等 25 秒...';
+  try {
+    const res = await fetch('/api/g4f/test_provider', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider, model})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      el('g4f-test-result').innerHTML =
+        `<span style="color:#4ade80">✓ ${data.provider} 可用</span>（模型 ${data.model}，耗时 ${data.elapsed_sec}s）— 回复：${data.reply}`;
+    } else {
+      el('g4f-test-result').innerHTML =
+        `<span style="color:#f87171">✗ ${data.provider} 不可用</span>：${data.error}`;
+    }
+  } catch (e) {
+    el('g4f-test-result').innerHTML = `<span style="color:#f87171">✗ 请求出错：${e}</span>`;
+  }
+}
+
+async function autoPickProvider() {
+  el('g4f-test-result').textContent = '正在依次尝试免费 Provider，可能需要一点时间...';
+  try {
+    const res = await fetch('/api/g4f/auto_pick');
+    const data = await res.json();
+    if (data.ok) {
+      el('g4f-provider').value = data.provider;
+      await loadModels(data.provider, '');
+      el('g4f-test-result').innerHTML =
+        `<span style="color:#4ade80">✓ 已自动选中并保存：${data.label}</span>（耗时 ${data.elapsed_sec}s）— 回复：${data.reply}`;
+    } else {
+      const triedList = (data.tried || []).map(t => `${t.provider}（${t.error}）`).join('；');
+      el('g4f-test-result').innerHTML =
+        `<span style="color:#f87171">✗ ${data.error}</span><br><span class="muted">已尝试：${triedList}</span>`;
+    }
+  } catch (e) {
+    el('g4f-test-result').innerHTML = `<span style="color:#f87171">✗ 请求出错：${e}</span>`;
+  }
+}
+
+// 页面加载时自动拉一次 Provider 列表
+loadProviders();
 
 // ============ ② 保存设置 / 通道检测 ============
 async function saveSettings() {

@@ -1,4 +1,7 @@
 fastapi
 uvicorn
 python-dotenv
+jinja2
+httpx
+python-multipart
 g4f[all]

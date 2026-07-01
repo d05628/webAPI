@@ -1,1 +1,11 @@
-
+body { font-family: "Microsoft YaHei", Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #222; }
+.sub { color: #666; margin-top: -10px; }
+section { margin-bottom: 24px; border: 1px solid #ddd; padding: 18px 20px; border-radius: 8px; }
+h2 { margin-top: 0; font-size: 18px; }
+input, select, textarea { width: 100%; padding: 8px; margin: 6px 0; box-sizing: border-box; }
+button { padding: 8px 18px; background: #2d6cdf; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+button:hover { background: #1c4fb0; }
+#response { background: #f8f9fa; padding: 12px; border-radius: 6px; white-space: pre-wrap; min-height: 60px; }
+.ok { color: #1a7d33; font-weight: bold; }
+.err { color: #c0392b; font-weight: bold; }
+code { background: #f1f1f1; padding: 1px 6px; border-radius: 4px; }

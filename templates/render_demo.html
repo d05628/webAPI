@@ -1,1 +1,25 @@
 
+<!--
+    render_demo.html —— 传统的"表单提交 -> 服务器渲染新页面"演示
+    对应 main.py 的 GET /render_demo 路由，name 和 mood 从 URL 查询参数取出，
+    渲染时被塞进了下面的文字里，每次提交表单都是一次全新的 render。
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>render_demo</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h1>render 演示</h1>
+    <p>现在时间是 <b>{{ now }}</b>，{{ name }} 同学现在的心情是「{{ mood }}」。</p>
+    <p>改一下浏览器地址栏，把 name 和 mood 换成别的词，再回车看看效果。</p>
+    <form method="get" action="/render_demo">
+        <input type="text" name="name" placeholder="你的名字" value="{{ name }}">
+        <input type="text" name="mood" placeholder="心情" value="{{ mood }}">
+        <button type="submit">重新渲染</button>
+    </form>
+    <p><a href="/">返回首页</a></p>
+</body>
+</html>

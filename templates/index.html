@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>全老师的测试页 —— FastAPI render + G4F 演示</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>全老师的测试页</h1>
+    <p>FastAPI · Jinja2Templates render 教学 + G4F 对话接口测试</p>
+    <p>
+      G4F 状态：
+      {% if g4f_available %}
+        <span class="badge ok">✓ 已安装</span>
+      {% else %}
+        <span class="badge bad">✗ 未安装/导入失败</span>
+      {% endif %}
+    </p>
+  </header>
+
+  <!-- ============================================================ -->
+  <!-- ① render 演示 -->
+  <!-- ============================================================ -->
+  <div class="card">
+    <h2><span class="num">1</span>render 演示</h2>
+    <p class="muted">
+      这个页面是服务器端渲染出来的：下面这几行数据是 Python 后端在
+      <code>main.py</code> 里算好、通过 <code>templates.TemplateResponse()</code>
+      传给 Jinja2 模板的，不是前端 JS 生成的。<b>刷新一下页面</b>，你会看到时间和随机数变了。
+    </p>
+
+    <p>🕒 服务器当前时间：<code>{{ now }}</code></p>
+    <p>🎲 服务器生成的随机数：<code>{{ rand_num }}</code></p>
+
+    <p>本页面演示的四个功能模块（这份列表也是从后端传过来的 Python 列表，
+      模板用 <code>{% raw %}{% for %}{% endraw %}</code> 循环渲染出来的）：</p>
+    <ul class="feature-list">
+      {% for item in feature_list %}
+        <li>{{ item }}</li>
+      {% endfor %}
+    </ul>
+
+    <p class="muted">
+      想看更纯粹的 render 例子，可以试试
+      <a href="/render_demo?name=同学&mood=好奇">/render_demo?name=同学&amp;mood=好奇</a>
+      —— 直接改地址栏的 URL 参数，页面内容就会跟着变。
+    </p>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ② Provider / 模型设置 -->
+  <!-- ============================================================ -->
+  <div class="card">
+    <h2><span class="num">2</span>Provider / 模型设置</h2>
+    <p class="muted">
+      g4f 依赖免费/非官方通道，不保证一直可用。如果测试时发现 AI 对话老是失败，
+      建议打开下面的「使用自定义 API」开关，填入任意 OpenAI 兼容的 Key（OpenAI 官方 /
+      DeepSeek / Kimi / 通义千问兼容模式等），稳定性会好很多。
+    </p>
+
+    <div class="toggle-row">
+      <input type="checkbox" id="use-custom-api" {% if settings.use_custom_api %}checked{% endif %}>
+      <label for="use-custom-api" style="margin:0;">使用自定义 OpenAI 兼容 API（推荐）</label>
+    </div>
+
+    <div id="g4f-fields" class="row">
+      <div class="field">
+        <label>g4f Provider（留空 = 自动选择可用通道）</label>
+        <input type="text" id="g4f-provider" value="{{ settings.g4f_provider }}" placeholder="例如 Bing / You / Blackbox（留空即可）">
+      </div>
+      <div class="field">
+        <label>g4f 模型</label>
+        <input type="text" id="g4f-model" value="{{ settings.g4f_model }}" placeholder="gpt-4o-mini">
+      </div>
+    </div>
+
+    <div id="custom-fields" class="row">
+      <div class="field">
+        <label>自定义 API Base URL</label>
+        <input type="text" id="custom-base" value="{{ settings.custom_api_base }}" style="width:260px;">
+      </div>
+      <div class="field">
+        <label>API Key</label>
+        <input type="password" id="custom-key" placeholder="sk-...（已保存则留空表示不修改）">
+      </div>
+      <div class="field">
+        <label>模型名</label>
+        <input type="text" id="custom-model" value="{{ settings.custom_api_model }}">
+      </div>
+    </div>
+
+    <div class="row">
+      <button onclick="saveSettings()">保存设置</button>
+      <button class="secondary" onclick="checkChannel()">🔍 通道检测</button>
+    </div>
+    <div id="settings-result"></div>
+    <div id="channel-result"></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ③ 计算器小工具 -->
+  <!-- ============================================================ -->
+  <div class="card">
+    <h2><span class="num">3</span>计算器小工具（对比 fetch 和 render）</h2>
+    <p class="muted">
+      跟上面「① render 演示」不同：这里点按钮不刷新整个页面，而是用前端 JS 的
+      <code>fetch()</code> 异步请求 <code>/api/calc</code> 接口，只更新结果那一小块。
+    </p>
+    <div class="row">
+      <input type="number" id="calc-a" value="1" style="width:90px;">
+      <select id="calc-op">
+        <option value="+">+</option>
+        <option value="-">-</option>
+        <option value="*">×</option>
+        <option value="/">÷</option>
+      </select>
+      <input type="number" id="calc-b" value="1" style="width:90px;">
+      <button onclick="doCalc()">计算</button>
+    </div>
+    <div id="calc-result"></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ④ AI 对话测试区 -->
+  <!-- ============================================================ -->
+  <div class="card">
+    <h2><span class="num">4</span>AI 对话测试区</h2>
+    <div class="row" style="margin-bottom: 10px;">
+      <div class="toggle-row">
+        <input type="checkbox" id="stream-toggle" checked>
+        <label for="stream-toggle" style="margin:0;">流式输出</label>
+      </div>
+      <button class="secondary" onclick="clearChat()">清空对话</button>
+    </div>
+
+    <div id="chat-box" class="chat-box"></div>
+
+    <div class="row">
+      <textarea id="chat-input" rows="2" style="flex:1; min-width:220px;" placeholder="输入消息，按 Ctrl+Enter 发送..."></textarea>
+      <button onclick="sendChat()">发送</button>
+    </div>
+  </div>
+
+  <footer>
+    Powered by FastAPI + Jinja2Templates + G4F &middot; {{ now }}
+  </footer>
+</div>
+
+<script>
+// ============ 通用小工具 ============
+function el(id) { return document.getElementById(id); }
+
+function toggleApiFields() {
+  const useCustom = el('use-custom-api').checked;
+  el('g4f-fields').style.opacity = useCustom ? 0.35 : 1;
+  el('custom-fields').style.opacity = useCustom ? 1 : 0.35;
+}
+el('use-custom-api').addEventListener('change', toggleApiFields);
+toggleApiFields();
+
+// ============ ② 保存设置 / 通道检测 ============
+async function saveSettings() {
+  const body = {
+    g4f_provider: el('g4f-provider').value.trim(),
+    g4f_model: el('g4f-model').value.trim() || 'gpt-4o-mini',
+    use_custom_api: el('use-custom-api').checked,
+    custom_api_base: el('custom-base').value.trim(),
+    custom_api_key: el('custom-key').value.trim(),
+    custom_api_model: el('custom-model').value.trim() || 'gpt-4o-mini',
+  };
+  const res = await fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  el('settings-result').innerHTML = data.ok
+    ? '<span style="color:#4ade80">✓ 设置已保存</span>'
+    : '<span style="color:#f87171">✗ 保存失败</span>';
+  el('custom-key').value = ''; // 保存后清空显示，避免明文停留在输入框
+}
+
+async function checkChannel() {
+  el('channel-result').textContent = '检测中...';
+  try {
+    const res = await fetch('/api/check_channel');
+    const data = await res.json();
+    if (data.ok) {
+      el('channel-result').innerHTML =
+        `<span style="color:#4ade80">✓ 通道正常</span>（${data.channel}，耗时 ${data.elapsed_sec}s）— 回复：${data.reply}`;
+    } else {
+      el('channel-result').innerHTML =
+        `<span style="color:#f87171">✗ 通道异常</span>（${data.channel}）：${data.error}`;
+    }
+  } catch (e) {
+    el('channel-result').innerHTML = `<span style="color:#f87171">✗ 请求出错：${e}</span>`;
+  }
+}
+
+// ============ ③ 计算器 ============
+async function doCalc() {
+  const a = parseFloat(el('calc-a').value);
+  const b = parseFloat(el('calc-b').value);
+  const op = el('calc-op').value;
+  el('calc-result').textContent = '计算中...';
+  try {
+    const res = await fetch('/api/calc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({a, b, op})
+    });
+    const data = await res.json();
+    el('calc-result').innerHTML = data.ok
+      ? `结果：<b>${data.result}</b>`
+      : `<span style="color:#f87171">出错：${data.error}</span>`;
+  } catch (e) {
+    el('calc-result').innerHTML = `<span style="color:#f87171">请求失败：${e}</span>`;
+  }
+}
+
+// ============ ④ AI 对话 ============
+let chatHistory = [];
+
+function renderChat() {
+  const box = el('chat-box');
+  box.innerHTML = chatHistory.map(m => `
+    <div class="msg ${m.role}">
+      <div class="role">${m.role === 'user' ? '🧑 你' : '🤖 AI'}</div>
+      <div>${m.content.replace(/</g, '&lt;')}</div>
+    </div>
+  `).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearChat() {
+  chatHistory = [];
+  renderChat();
+}
+
+el('chat-input').addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'Enter') sendChat();
+});
+
+async function sendChat() {
+  const input = el('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  chatHistory.push({role: 'user', content: text});
+  renderChat();
+
+  const stream = el('stream-toggle').checked;
+  chatHistory.push({role: 'assistant', content: ''});
+  renderChat();
+
+  const assistantIndex = chatHistory.length - 1;
+
+  try {
+    if (stream) {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({messages: chatHistory.slice(0, -1), stream: true})
+      });
+      if (!res.ok || !res.body) {
+        const errText = await res.text();
+        chatHistory[assistantIndex].content = '⚠️ 出错：' + errText;
+        renderChat();
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let full = '';
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        full += decoder.decode(value, {stream: true});
+        chatHistory[assistantIndex].content = full;
+        renderChat();
+      }
+    } else {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({messages: chatHistory.slice(0, -1), stream: false})
+      });
+      const data = await res.json();
+      chatHistory[assistantIndex].content = data.ok ? data.reply : ('⚠️ 出错：' + data.error);
+      renderChat();
+    }
+  } catch (e) {
+    chatHistory[assistantIndex].content = '⚠️ 请求失败：' + e;
+    renderChat();
+  }
+}
+</script>
+</body>
+</html>

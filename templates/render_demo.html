@@ -1,25 +1,43 @@
-
-<!--
-    render_demo.html —— 传统的"表单提交 -> 服务器渲染新页面"演示
-    对应 main.py 的 GET /render_demo 路由，name 和 mood 从 URL 查询参数取出，
-    渲染时被塞进了下面的文字里，每次提交表单都是一次全新的 render。
--->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>render_demo</title>
-    <link rel="stylesheet" href="/static/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>render 小例子 —— {{ name }}</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <h1>render 演示</h1>
-    <p>现在时间是 <b>{{ now }}</b>，{{ name }} 同学现在的心情是「{{ mood }}」。</p>
-    <p>改一下浏览器地址栏，把 name 和 mood 换成别的词，再回车看看效果。</p>
-    <form method="get" action="/render_demo">
-        <input type="text" name="name" placeholder="你的名字" value="{{ name }}">
-        <input type="text" name="mood" placeholder="心情" value="{{ mood }}">
-        <button type="submit">重新渲染</button>
-    </form>
-    <p><a href="/">返回首页</a></p>
+<div class="wrap">
+  <header class="top">
+    <h1>render 小例子</h1>
+    <p>{{ tip }}</p>
+  </header>
+
+  <div class="card">
+    <h2><span class="num">✓</span>这段内容是后端渲染出来的</h2>
+    <p>你好，<b>{{ name }}</b>！现在是 <code>{{ now }}</code>，
+      系统读到你的心情是：<b>{{ mood }}</b>。</p>
+
+    <p class="muted">
+      这一整段文字（包括名字、心情、时间）都不是写死在 HTML 里的，
+      而是 <code>main.py</code> 里的 <code>render_demo()</code> 函数
+      读取 URL 参数 <code>?name=...&mood=...</code> 后，通过
+      <code>Jinja2Templates().TemplateResponse()</code> 塞进这个模板文件的
+      <code>{% raw %}{{ name }}{% endraw %}</code> / <code>{% raw %}{{ mood }}{% endraw %}</code>
+      占位符渲染出来的。
+    </p>
+
+    <p>试试修改地址栏参数，回车看看效果：</p>
+    <ul class="feature-list">
+      <li><a href="/render_demo?name=小明&mood=兴奋">/render_demo?name=小明&amp;mood=兴奋</a></li>
+      <li><a href="/render_demo?name=全老师&mood=淡定">/render_demo?name=全老师&amp;mood=淡定</a></li>
+      <li><a href="/render_demo?name=六年级同学&mood=好奇">/render_demo?name=六年级同学&amp;mood=好奇</a></li>
+    </ul>
+
+    <p><a href="/">← 返回首页</a></p>
+  </div>
+
+  <footer>Powered by FastAPI + Jinja2Templates</footer>
+</div>
 </body>
 </html>

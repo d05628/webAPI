@@ -172,3 +172,12 @@ footer {
 }
 
 a { color: var(--accent); }
+
+.media-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+.media-result img, .media-result video { max-height: 360px; }
+.media-result audio { min-width: 260px; }

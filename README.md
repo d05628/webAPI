@@ -35,11 +35,38 @@ uvicorn main:app --reload
 - **① render 演示**：展示服务器端模板渲染（变量、循环、条件），刷新页面
   可看到时间/随机数变化；`/render_demo?name=xxx&mood=xxx` 是一个可以直接改
   URL 参数体验 render 的小例子。
-- **② Provider / 模型设置**：可视化修改 g4f provider、模型列表，或者切换到
-  自定义 OpenAI 兼容 API（推荐，稳定性更好）。
+- **② Provider / 模型设置**：g4f Provider / 模型下拉框都是**实时拉取**的（不是写死的文本框），
+  支持一键"🔄 刷新列表"、"🧪 测试这个 Provider"、"⚡ 自动选择可用 Provider"；
+  也可以切换到自定义 OpenAI 兼容 API（推荐，稳定性更好）。
 - **③ 计算器小工具**：演示前端 JS `fetch()` 异步调用后端接口，与 render 做对比。
 - **④ AI 对话测试区**：可选流式/非流式输出，附带"通道检测"按钮，
   一键测试当前对话通道是否可用。
+- **⑤ 图片生成**：文生图，Provider/模型实时发现，默认推荐 `AnyProvider`
+  （它自己会在背后依次尝试几十个免费图片后端，成功率最高）。
+- **⑥ 语音生成**：文字转语音，可填音色（不同 Provider 音色名不同，比如
+  OpenAIFM 是 alloy/ash/coral 这种）和输出格式。
+- **⑦ 视频生成**：文生视频，免费视频 Provider 本来就不多，同样推荐用 `AnyProvider`；
+  视频生成通常比较慢，耐心等 1~3 分钟。
+
+生成出来的图片/语音/视频，要么是 Provider 给的外部直链，要么会自动存到项目目录下的
+`generated_media/` 文件夹，并通过 `/media/xxx` 这个路径直接在页面上播放/展示
+（这个目录就是 g4f 库自己默认的媒体缓存目录，不用额外配置）。
+
+## 关于 G4F Provider / 模型的实时发现（重要）
+
+早期版本有个 bug：用 `getattr(g4f.Provider, provider_name)` 取 Provider 类，
+但在新版 g4f（7.x）里这个路径拿到的其实是"子模块"而不是真正的 Provider 类，
+导致调用静默失败。现在已经改成从 `g4f.Provider.ProviderUtils.convert` 这个字典
+按名字取真正的类，并且统一用官方现在推荐的 `g4f.client.Client`（OpenAI 风格）。
+
+图片/语音/视频三种能力的 Provider 和模型，优先从 Provider 类自带的
+`image_models` / `audio_models` / `video_models` 属性里读（不用额外发请求，
+速度快）；拿不到就去 `g4f.models.ModelUtils` 这个全局"模型 → Provider 兜底链"
+注册表里找同类型、且兜底链里包含这个 Provider 的模型。
+
+`AnyProvider` 是 g4f 内置的聚合器，背后接了几十个图片/视频/语音后端，
+免登录、覆盖面最广，所以页面上每种媒体能力都默认选中它——不知道选哪个
+就用它，它自己会依次尝试直到成功。
 
 ## 关于 G4F 不稳定的说明
 
@@ -69,5 +96,12 @@ g4f 依赖的是免费/非官方通道，本身并不保证一直可用。本项
 | POST | `/api/calc` | 计算器接口，`{a, b, op}` |
 | GET | `/api/settings` | 获取当前 provider / API 设置 |
 | POST | `/api/settings` | 保存 provider / API 设置 |
+| GET | `/api/g4f/providers` | 实时列出可用的聊天 Provider |
+| GET | `/api/g4f/models?provider=` | 实时列出某聊天 Provider 支持的模型 |
+| POST | `/api/g4f/test_provider` | 单独测试某个聊天 Provider+模型 |
+| GET | `/api/g4f/auto_pick` | 自动挑一个当前可用的免费聊天 Provider |
+| GET | `/api/g4f/capability_providers?capability=` | 实时列出某种能力（image/audio/video）的 Provider |
+| GET | `/api/g4f/capability_models?provider=&capability=` | 实时列出某 Provider 在某能力下的模型 |
+| POST | `/api/g4f/media/generate` | 统一的图片/语音/视频生成入口 |
 | POST | `/api/chat` | 对话接口，`{messages, stream}` |
 | GET | `/api/check_channel` | 通道检测 |

@@ -20,6 +20,9 @@ import time
 import random
 import json
 import asyncio
+import os
+import uuid
+import base64
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -49,6 +52,7 @@ try:
     import g4f
     from g4f.client import Client as G4FClient
     from g4f.Provider import ProviderUtils
+    import g4f.models as g4f_models  # 全局"模型 -> Provider fallback 链"注册表
     G4F_AVAILABLE = True
     G4F_IMPORT_ERROR = ""
 except Exception as e:  # noqa: BLE001
@@ -72,6 +76,16 @@ templates = Jinja2Templates(directory="templates")
 
 # 静态文件（CSS/JS），如果你不需要可以删掉这一行
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ------------------------------------------------------------------
+# g4f 生成的图片/音频/视频，默认就会存到进程当前目录下的 ./generated_media
+# （这是 g4f 库自己的默认行为，get_media_dir() 返回 "./generated_media"）。
+# 我们把这个目录挂载成 /media，这样 g4f 返回的 "/media/xxx.jpg" 相对路径
+# 可以直接被浏览器访问，不用自己再写一遍下载/转存逻辑。
+# ------------------------------------------------------------------
+MEDIA_DIR = "generated_media"
+os.makedirs(MEDIA_DIR, exist_ok=True)
+app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 
 
 # ------------------------------------------------------------------
@@ -116,9 +130,12 @@ async def index(request: Request):
         "rand_num": random.randint(1, 100),
         "feature_list": [
             "① render 演示：服务器端模板渲染",
-            "② Provider / 模型设置：可视化切换 g4f 或自定义 API",
+            "② Provider / 模型设置：实时拉取 g4f 可用 Provider + 一键自动选择",
             "③ 计算器小工具：前端 fetch() 异步调用后端接口",
             "④ AI 对话测试区：流式 / 非流式 + 通道检测",
+            "⑤ 图片生成：g4f 图片 Provider 实时发现 + 生成",
+            "⑥ 语音生成：文字转语音，音色 / 格式可选",
+            "⑦ 视频生成：g4f 视频 Provider 实时发现 + 生成",
         ],
         "g4f_available": G4F_AVAILABLE,
         "settings": SETTINGS,
@@ -304,6 +321,140 @@ def _list_models_for_provider(provider_name: str) -> List[str]:
             uniq.append(m)
             seen.add(m)
     return uniq[:80]
+
+
+# --------------------------------------------------------------
+# 图片 / 音频 / 视频 —— 三种"媒体生成"能力的实时发现
+# --------------------------------------------------------------
+# g4f 里同一个 Provider 类除了聊天，往往还带着
+# image_models / audio_models / video_models 这几个属性
+# （值是 list 或 dict，key 就是模型名），这是「这个 Provider 支持哪些
+# 媒体模型」最直接、不用额外发网络请求就能拿到的信息源。
+#
+# AnyProvider 是 g4f 内置的一个"聚合器"，背后接了几十个图片/视频/语音
+# 后端，覆盖面最广、免登录，所以每种能力我们都把它排在最前面，
+# 作为"不知道选哪个就选它"的推荐项。
+# --------------------------------------------------------------
+
+CAPABILITY_ATTR = {
+    "image": "image_models",
+    "audio": "audio_models",
+    "video": "video_models",
+}
+
+# 除了从 Provider 类属性里自动扫，这几个是 g4f 官方文档里点名的媒体
+# Provider，就算属性暂时是空的（有些是运行时才填充）也顺手带上，
+# 保证页面上不会因为一时扫不到而漏选。
+CURATED_MEDIA_PROVIDERS = {
+    "image": ["AnyProvider", "PollinationsAI", "HuggingFaceMedia", "Together", "HuggingSpace",
+              "BlackForestLabs_Flux1Dev", "BlackForestLabs_Flux1KontextDev", "OpenaiChat", "Gemini"],
+    "audio": ["AnyProvider", "PollinationsAI", "OpenAIFM", "EdgeTTS", "gTTS", "Gemini"],
+    "video": ["AnyProvider", "HuggingFaceMedia"],
+}
+
+
+def _list_providers_for_capability(capability: str) -> List[Dict[str, Any]]:
+    """列出支持某种媒体能力（image/audio/video）的 Provider"""
+    attr = CAPABILITY_ATTR.get(capability)
+    if attr is None:
+        return []
+    names = set()
+    for name, cls in ProviderUtils.convert.items():
+        val = getattr(cls, attr, None)
+        if val:  # 非空 list / dict 都算 truthy
+            names.add(name)
+    names.update(CURATED_MEDIA_PROVIDERS.get(capability, []))
+
+    result = []
+    for name in names:
+        cls = ProviderUtils.convert.get(name)
+        if cls is None:
+            continue
+        result.append({
+            "name": name,
+            "label": getattr(cls, "label", None) or name,
+            "needs_auth": bool(getattr(cls, "needs_auth", False)),
+            "working": bool(getattr(cls, "working", False)),
+        })
+    # AnyProvider 置顶 → 免登录且 working 的其次 → 其余按名字排序
+    result.sort(key=lambda p: (p["name"] != "AnyProvider", p["needs_auth"], not p["working"], p["label"]))
+    return result
+
+
+def _list_models_for_capability(provider_name: str, capability: str) -> List[str]:
+    """列出某个 Provider 在某种媒体能力下支持的模型名"""
+    cls = _resolve_provider_cls(provider_name)
+    if cls is None:
+        return []
+    attr = CAPABILITY_ATTR.get(capability)
+    models: List[str] = []
+
+    val = getattr(cls, attr, None) if attr else None
+    if isinstance(val, dict):
+        models = list(val.keys())
+    elif isinstance(val, (list, tuple)):
+        models = [str(m) for m in val]
+
+    if not models:
+        # 静态属性拿不到时，去全局模型注册表里找同类型、且 fallback 链里
+        # 包含这个 Provider 的模型名（g4f.models.ModelUtils.convert）
+        type_cls = {"image": g4f_models.ImageModel, "audio": g4f_models.AudioModel,
+                    "video": g4f_models.VideoModel}.get(capability)
+        if type_cls is not None:
+            for mname, m in g4f_models.ModelUtils.convert.items():
+                if not isinstance(m, type_cls):
+                    continue
+                bp = getattr(m, "best_provider", None)
+                chain_names = [p.__name__ for p in getattr(bp, "providers", [bp] if bp else [])]
+                if provider_name in chain_names:
+                    models.append(mname)
+
+    # 去重保序，限制数量避免下拉框过长
+    seen, uniq = set(), []
+    for m in models:
+        if m and m not in seen:
+            uniq.append(m)
+            seen.add(m)
+    return uniq[:100]
+
+
+def _persist_media_result(item) -> str:
+    """
+    把一次媒体生成结果统一整理成一个可直接访问的 URL：
+    - 如果 Provider 直接给了 http(s) 外链，原样返回（大部分免费图床/CDN 都是这种）；
+    - 如果是 g4f 自己存到 ./generated_media 的相对路径（"/media/xxx"），
+      正好是我们挂载的同一个目录，直接返回即可；
+    - 如果只给了 base64（b64_json），我们自己写文件存到 generated_media 里。
+    """
+    url = getattr(item, "url", None)
+    if url:
+        return url  # 无论是外部直链还是 g4f 自己的 "/media/xxx" 相对路径，都能直接用
+    b64 = getattr(item, "b64_json", None)
+    if b64:
+        filename = f"{uuid.uuid4().hex}.png"
+        target = os.path.join(MEDIA_DIR, filename)
+        with open(target, "wb") as f:
+            f.write(base64.b64decode(b64))
+        return f"/media/{filename}"
+    return ""
+
+
+def _sync_g4f_media(prompt: str, provider_name: str, model: str, extra_kwargs: Dict[str, Any]):
+    """
+    图片 / 音频 / 视频统一走这一个入口 —— g4f.client 的 media.generate()
+    本身就是设计成通用的媒体生成方法（内部会根据 Provider/模型自动决定
+    生成的是图片、语音还是视频）。同步方法内部会自己开一个新的事件循环
+    （asyncio.run），所以必须放线程池里跑，不能直接在 FastAPI 的
+    事件循环里调用。
+    """
+    client = G4FClient()
+    kwargs: Dict[str, Any] = dict(extra_kwargs or {})
+    if model:
+        kwargs["model"] = model
+    provider_cls = _resolve_provider_cls(provider_name)
+    if provider_cls is not None:
+        kwargs["provider"] = provider_cls
+    return client.media.generate(prompt=prompt, **kwargs)
 
 
 def _sync_g4f_create(messages: List[Dict[str, str]], provider_name: str, model: str, stream: bool):
@@ -607,6 +758,116 @@ async def g4f_auto_pick():
         {"ok": False, "error": "试了一圈免费 Provider 都没成功，建议改用「自定义 OpenAI 兼容 API」", "tried": tried},
         status_code=500,
     )
+
+
+# --------------------------------------------------------------
+# 媒体能力（图片 / 音频 / 视频）的实时发现 + 生成接口
+# --------------------------------------------------------------
+
+@app.get("/api/g4f/capability_providers")
+async def g4f_capability_providers(capability: str = Query(..., description="chat / image / audio / video")):
+    """列出支持某种能力的 Provider。chat 复用聊天那条逻辑，image/audio/video 走媒体属性扫描。"""
+    if not G4F_AVAILABLE:
+        return JSONResponse({"ok": False, "error": f"g4f 未正确安装：{G4F_IMPORT_ERROR}"}, status_code=500)
+    if capability not in ("chat", "image", "audio", "video"):
+        return JSONResponse({"ok": False, "error": f"未知能力类型：{capability}"}, status_code=400)
+    try:
+        if capability == "chat":
+            providers = await asyncio.to_thread(_list_working_providers)
+        else:
+            providers = await asyncio.to_thread(_list_providers_for_capability, capability)
+        return {"ok": True, "capability": capability, "count": len(providers), "providers": providers}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/g4f/capability_models")
+async def g4f_capability_models(
+    provider: str = Query(default=""),
+    capability: str = Query(..., description="chat / image / audio / video"),
+):
+    """列出某个 Provider 在某种能力下支持的模型。"""
+    if not G4F_AVAILABLE:
+        return JSONResponse({"ok": False, "error": f"g4f 未正确安装：{G4F_IMPORT_ERROR}"}, status_code=500)
+    if not provider:
+        return {"ok": True, "provider": "", "models": []}
+    try:
+        if capability == "chat":
+            models = await asyncio.wait_for(
+                asyncio.to_thread(_list_models_for_provider, provider), timeout=12
+            )
+        else:
+            models = await asyncio.wait_for(
+                asyncio.to_thread(_list_models_for_capability, provider, capability), timeout=12
+            )
+        return {"ok": True, "provider": provider, "models": models}
+    except asyncio.TimeoutError:
+        return JSONResponse({"ok": False, "error": "获取模型列表超时"}, status_code=504)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class MediaGenPayload(BaseModel):
+    capability: str  # image / audio / video
+    provider: str = ""
+    model: str = ""
+    prompt: str = ""
+    voice: Optional[str] = None      # 语音生成可选：音色
+    audio_format: Optional[str] = None  # 语音生成可选：输出格式，例如 mp3
+
+
+# 不同媒体类型生成耗时差异很大：图片一般几秒到二十秒，
+# 语音通常很快，视频最慢（有的 Provider 要一两分钟排队生成）。
+MEDIA_TIMEOUTS = {"image": 60, "audio": 60, "video": 180}
+
+
+@app.post("/api/g4f/media/generate")
+async def g4f_media_generate(payload: MediaGenPayload):
+    """
+    统一的媒体生成入口：图片 / 语音 / 视频都走这里。
+    对应页面上的「⑤ 图片生成」「⑥ 语音生成」「⑦ 视频生成」三个板块。
+    """
+    if not G4F_AVAILABLE:
+        return JSONResponse({"ok": False, "error": f"g4f 未正确安装：{G4F_IMPORT_ERROR}"}, status_code=500)
+    if payload.capability not in ("image", "audio", "video"):
+        return JSONResponse({"ok": False, "error": f"未知能力类型：{payload.capability}"}, status_code=400)
+    if not payload.prompt.strip():
+        return JSONResponse({"ok": False, "error": "内容不能为空"}, status_code=400)
+
+    extra_kwargs: Dict[str, Any] = {}
+    if payload.capability == "audio":
+        if payload.voice:
+            extra_kwargs["voice"] = payload.voice
+        if payload.audio_format:
+            extra_kwargs["audio_format"] = payload.audio_format
+
+    start = time.time()
+    timeout = MEDIA_TIMEOUTS.get(payload.capability, 60)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(_sync_g4f_media, payload.prompt, payload.provider, payload.model, extra_kwargs),
+            timeout=timeout,
+        )
+        items = getattr(response, "data", None) or []
+        urls = [await asyncio.to_thread(_persist_media_result, item) for item in items]
+        urls = [u for u in urls if u]
+        elapsed = round(time.time() - start, 2)
+        if not urls:
+            return JSONResponse(
+                {"ok": False, "error": "Provider 没有返回可用的媒体结果，换一个 Provider 试试", "elapsed_sec": elapsed},
+                status_code=502,
+            )
+        return {"ok": True, "capability": payload.capability, "provider": payload.provider or "(自动)",
+                "model": payload.model or "(默认)", "urls": urls, "elapsed_sec": elapsed}
+    except asyncio.TimeoutError:
+        elapsed = round(time.time() - start, 2)
+        return JSONResponse(
+            {"ok": False, "error": f"生成超时（{timeout}s），换一个 Provider 或稍后再试", "elapsed_sec": elapsed},
+            status_code=504,
+        )
+    except Exception as e:  # noqa: BLE001
+        elapsed = round(time.time() - start, 2)
+        return JSONResponse({"ok": False, "error": str(e), "elapsed_sec": elapsed}, status_code=500)
 
 
 @app.get("/api/check_channel")
